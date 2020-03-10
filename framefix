@@ -1,15 +1,15 @@
 #!/usr/bin/env perl
 
 #1. Identify homopolymer regions in the genome.
-#2. Send these with a genomic neighbourhood to NCBI for BLASTX search (live remote database, so Internet connection is required).
+#2. Send these with a genomic neighbourhood to Diamond for BLASTX search.
 #3. See if the translation frame for the best match shifts and adjust the genome so it does not.
 
 use strict;
 use warnings;
 
 my $matrix = "PAM30"; # better suited for closely related, short matches
-my $num_threads = 6; 
-my $min_homopolymer_size_to_correct = 6;
+my $num_threads = 6;  # I see diminshing returns above 6, YMMV
+my $min_homopolymer_size_to_correct = 6; # base on R9.4 chemistry for nanopore
 my $homopolymer_context_for_blast = 90; # how much flanking sequence to provide to anchor the homopolymer match
 my $alignment_padding = 13; # number of DNA bases that Diamond can misalign at a frameshift but we still consider it the frameshift site
 
