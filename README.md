@@ -29,6 +29,6 @@ executable (e.g. ```chmod u+x framefix```) it can be run like so:
 Where 1e-25 is the e-value threshold to consider a match evidence of a frameshift. 
 Three output files are generated ```output_prefix.homopolymers_query.txt``` which lists the homopolymers 
 and their genomic context that were submitted for inquiry to Diamond, ```output_prefix.diamond_nr.txt```
-which is the best Diamond output for each of those queries (note that we are not doing taxomnomic 
+which is the best Diamond output for each of those queries (note that we are not doing taxonomic 
 assignment with this code, so best hit is sufficient), and ```output_prefix.frameshift_adjusted.fna```
 which has the parsimonious edits based on those Diamond matches applied to your input FastA genome file.
