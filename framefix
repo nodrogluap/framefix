@@ -1,0 +1,147 @@
+#!/usr/bin/env perl
+
+#1. Identify homopolymer regions in the genome.
+#2. Send these with a genomic neighbourhood to NCBI for BLASTX search (live remote database, so Internet connection is required).
+#3. See if the translation frame for the best match shifts and adjust the genome so it does not.
+
+use strict;
+use warnings;
+
+my $matrix = "PAM30"; # better suited for closely related, short matches
+my $num_threads = 6; 
+my $min_homopolymer_size_to_correct = 6;
+my $homopolymer_context_for_blast = 90; # how much flanking sequence to provide to anchor the homopolymer match
+my $alignment_padding = 13; # number of DNA bases that Diamond can misalign at a frameshift but we still consider it the frameshift site
+
+@ARGV == 4 or die "Usage: $0 <genome.fna> <e-value threshold for correction> <output files prefix> <diamond protein db path>\n";
+
+my $contigs_fasta = shift @ARGV;
+my $evalue_threshold = shift @ARGV;
+my $output_prefix = shift @ARGV;
+my $db_path = shift @ARGV;
+
+open(CONTIGS_FASTA, $contigs_fasta)
+  or die "Cannot open $contigs_fasta for reading: $!\n";
+my $query_fasta = "$output_prefix.homopolymers_query.txt";
+open(QUERY_FASTA, ">$query_fasta")
+  or die "Cannot open $query_fasta for writing: $!\n";
+
+my (%contigs, %contig_description_lines);
+$/ = "\n>"; # record separator for FASTA
+while(<CONTIGS_FASTA>){
+	my($desc, $seq) = />?(.*?)\n(.*)/s;
+	my $contig_id = $desc =~ /^(\S+).*/;
+        $contig_description_lines{$contig_id} = $desc;
+	$seq =~ tr/ \n//d;
+	$contigs{$contig_id} = $seq; # for editing later
+	while($seq =~ /(a{$min_homopolymer_size_to_correct,}|c{$min_homopolymer_size_to_correct,}|g{$min_homopolymer_size_to_correct,}|t{$min_homopolymer_size_to_correct,})/igo){
+		my $homopolymer_start = pos($seq);
+		my $homopolymer_end = $homopolymer_start + length($&) - 1;
+		my $context_start = $homopolymer_start < $homopolymer_context_for_blast ? 0 : $homopolymer_start - $homopolymer_context_for_blast;
+		my $context_end = $homopolymer_end + $homopolymer_context_for_blast >= length($seq) ? length($seq)-1 : $homopolymer_end + $homopolymer_context_for_blast;
+		my $homopolymer_and_context = substr($seq, $context_start, $context_end-$context_start+1);
+		$homopolymer_and_context =~ s/(.{1,60})/$1\n/g; # format to 60 bases per line
+		print QUERY_FASTA ">$contig_id\_$homopolymer_start-$homopolymer_end\_homopolymer_$context_start-$context_end\n", $homopolymer_and_context;
+	}
+}
+close(CONTIGS_FASTA);
+close(QUERY_FASTA);
+$/ = "\n"; # record separator sanity restored
+
+my $adjusted_fasta_file = "$output_prefix.frameshift_adjusted.fna";
+my $result_file = "$output_prefix.diamond_nr.txt";
+# diamond blastx -d /gpfs/common/dbs/diamond/nr.PAM30.dmnd -q q -F 15 -p 24 --matrix PAM30 -e 1e-20 -k 1 --outfmt 6 qseqid stitle sseqid qstart qend sstart send qframe btop > diamond_test
+# 1_2556-2561_homopolymer_2466-2651	WP_000138473.1 recombinase [Staphylococcus aureus]	WP_000138473.1	1	184	58	118	1	28\-33
+# 1_2942-2948_homopolymer_2852-3038	WP_000138473.1 recombinase [Staphylococcus aureus]	WP_000138473.1	3	185	187	247	3	61
+system("diamond blastx -d $db_path ".  # non-redundant all NCBI proteins database, UniRef90, or something of the sort
+                      "-q $query_fasta -o $result_file ". # I/O spec
+                      "-e $evalue_threshold -p $num_threads -k 1 --matrix $matrix -F 15 ".
+                      "--outfmt 6 qseqid stitle sseqid qstart qend sstart send qframe btop") >> 8
+  and die "Error running diamond blastx: exit code $?";
+
+my (%edits);
+open(BLAST_OUTPUT_TABULAR, $result_file)
+  or die "Cannot open BLAST output file $result_file for reading: $!\n";
+while(<BLAST_OUTPUT_TABULAR>){
+	chomp;
+	my ($qseqid, $stitle, $sacc, $qstart, $qend, $sstart, $send, $qframe, $btop) = split /\t/, $_;
+	my ($contig, $cstart, $cend, $hstart, $hend) = $qseqid =~ /^(\S+)_(\d+)-(\d+)_homopolymer_(\d+)-(\d+)$/;
+	#print $qseqid,"\t", $qframe, "\t", $qstart, "\t", $qend, "\t";
+
+	# It's possible that there are multiple frameshift in the context, make sure we're only addressing the target homopolymer
+	my $local_query_homopolymer_start = $cstart - $hstart + 1; # BLAST alignment coords are 1-based
+	my $local_query_homopolymer_end = $cend - $hstart + 1; # BLAST alignment coords are 1-based
+
+	# The BLAST traceback operation will have a / if there is a -1 frameshift, and \ if it's a +1 frameshift
+	my $parsimonious_edit = 0;
+	my @btop_parts = split /([\\\/])/, $btop;
+	#print "$btop->", $#btop_parts, "\n";
+	if($#btop_parts == 2){ # single frameshift in btop looks like ##/-## or ##\-##
+		$parsimonious_edit = $btop_parts[1];
+		my $framehift_prefix = $qframe < 0 ? $btop_parts[2] : $btop_parts[0];
+		my $offset = 0; # in AA match coords
+		while($framehift_prefix =~ /(\d+|[A-Z\*])/g){
+			my $move = $1;
+			if($move =~ /^\d+$/){
+				$offset += $move;
+			}
+			else{
+				$offset++;
+			}
+		}
+		my $frameshift_location = ($qframe < 0 ? $qend : $qstart)+3*$offset; # in query DNA coords
+		#print "Comparing ", $frameshift_location, " to (", $local_query_homopolymer_start, ", $local_query_homopolymer_end)\n";
+		if($frameshift_location >= $local_query_homopolymer_start-$alignment_padding and $frameshift_location <= $local_query_homopolymer_end+$alignment_padding){
+			# We're looking at the right side of the homopolymer match
+			$parsimonious_edit = $parsimonious_edit eq "/" ? -1 : 1; # text to number
+		}
+		else{
+			next;
+		}
+	}
+	else{
+		next;
+	}
+
+	$edits{$contig} //= {};
+	
+	# Do not correct the frameshift by going lower than the $min_homopolymer_size_to_correct
+	if($hend - $hstart + 1 == $min_homopolymer_size_to_correct){
+		if($parsimonious_edit < 0){
+			$edits{$contig}->{$hstart} = 2;
+		}
+		else{
+			$edits{$contig}->{$hstart} = 1;
+		}
+	}
+	# For longer stretches the best option can be a single base contraction or expansion
+	else{
+		$edits{$contig}->{$hstart} = $parsimonious_edit;
+	}
+}
+close(BLAST_OUTPUT_TABULAR);
+
+for my $contig_id (keys %edits){
+	my $seq = $contigs{$contig_id};
+	# Editing only works with the original coordinates if you process from 3' to 5' on the positive ref strand
+	for my $pos (sort {$b <=> $a} keys %{$edits{$contig_id}}){	
+		my $edit = $edits{$contig_id}->{$pos};
+		if($edit < 0){
+			substr($seq, $pos, -$edit) = "";
+		}
+		else{
+			my $homopolymer_base = substr($seq, $pos, 1);
+			substr($seq, $pos, 0) = $homopolymer_base x $edit;
+		}
+	}
+	$contigs{$contig_id} = $seq;
+}
+
+open(FASTA_OUT, ">$adjusted_fasta_file")
+  or die "Cannot open $adjusted_fasta_file for writing: $!\n";
+for my $contig_id (sort keys %contigs){
+	my $seq = $contigs{$contig_id};
+	$seq =~ s/(.{1,60})/$1\n/g;
+	print FASTA_OUT ">",$contig_description_lines{$contig_id},"\n", $seq;
+}
+close(FASTA_OUT);
