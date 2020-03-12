@@ -23,7 +23,7 @@ The program is a simple Perl script with no code dependencies, so once
 executable (e.g. ```chmod u+x framefix```) it can be run like so:
 
 ``
-./framefix FastA 1e-25 output_prefix /path/to/uniref90/diamond_index
+./framefix nanopore_assembly.fasta 1e-25 output_prefix /path/to/uniref90/diamond_index
 ``
 
 Where 1e-25 is the e-value threshold to consider a match evidence of a frameshift. 
