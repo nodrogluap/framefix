@@ -22,7 +22,7 @@ I typically use [UniRef90](https://www.uniprot.org/downloads).
 The program is a simple Perl script with no code dependencies, so once 
 executable (e.g. ```chmod u+x framefix```) it can be run like so:
 
-``bash
+``
 ./framefix FastA 1e-25 output_prefix /path/to/uniref90/diamond_index
 ``
 
